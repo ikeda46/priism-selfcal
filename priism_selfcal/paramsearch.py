@@ -267,6 +267,7 @@ def search_imaging_regularizers(
         imager, l1_exp_range=(-15, 15), ltsv_exp_range=(-15, 15),
         bayesopt_n_startup_trials: int = 20, bayesopt_n_search_trials: int = 30,
         imaging_maxiter: int = 500, imaging_eps: float = 1.0e-4,
+        final_imaging_maxiter: int | None = None, final_imaging_eps: float | None = None,
         ellipse_th: float = 0.995, cos_th: float = 0.99,
         nonnegative: bool = True, scalehyperparam: bool = False,
         imageprefix: str = 'image_paramsearch',
@@ -296,11 +297,30 @@ def search_imaging_regularizers(
               Point this at a scratch directory if calling from a test or
               a batch job.
 
+    final_imaging_maxiter, final_imaging_eps -- if given, override
+              imaging_maxiter/imaging_eps for the one extra solve done at
+              the winning (l1, ltsv) after the search (see below); None
+              (default) reuses the search-time values. Since the search
+              itself necessarily runs every trial at a small maxiter for
+              speed (2026-08-21: the paper's own historical scripts did
+              the same, then separately re-solved the winning point with
+              more iterations rather than trusting the search-time
+              solve's convergence), pass a substantially larger value
+              here (and/or a tighter eps) to actually converge -- this is
+              the "freeze the winning parameters and re-run priism"
+              step the user recalled from the original workflow, not an
+              optional extra.
+
     Returns the winning (l1, ltsv) together with the resulting image,
     obtained via one extra explicit solve() at that point (rather than
     reading back the FITS file optimizeparameters() already wrote) so
     that imager.imagearray/working_set reliably reflect the winner even
     though Optuna's last-evaluated trial isn't necessarily the best one.
+    This final solve also uses overwriteinitialimage=True, so it (and
+    not whatever unrelated trial Optuna last happened to evaluate) is
+    what the next stage warm-starts from -- e.g. run_staged_parameter_search's
+    mu search starts from stage 0's own actual winning image, not a
+    leftover from some other (l1, ltsv) Optuna tried along the way.
     """
     l1_list = _log_grid(l1_exp_range)
     ltsv_list = _log_grid(ltsv_exp_range)
@@ -326,8 +346,13 @@ def search_imaging_regularizers(
     )
     best_l1, best_ltsv = best['L1'], best['Ltsv']
 
-    imager.solve(best_l1, best_ltsv, maxiter=imaging_maxiter, eps=imaging_eps,
-                 nonnegative=nonnegative, scalehyperparam=scalehyperparam)
+    imager.solve(
+        best_l1, best_ltsv,
+        maxiter=final_imaging_maxiter if final_imaging_maxiter is not None else imaging_maxiter,
+        eps=final_imaging_eps if final_imaging_eps is not None else imaging_eps,
+        nonnegative=nonnegative, scalehyperparam=scalehyperparam,
+        storeinitialimage=True, overwriteinitialimage=True,
+    )
     image = np.squeeze(imager.imagearray.data)
 
     for leftover in glob.glob(imageprefix + '*'):
@@ -352,6 +377,7 @@ def run_staged_parameter_search(
         selfcal_num: int = 3,
         bayesopt_n_startup_trials: int = 20, bayesopt_n_search_trials: int = 30,
         imaging_maxiter: int = 300, imaging_eps: float = 1.0e-4,
+        final_imaging_maxiter: int = 2000, final_imaging_eps: float = 1.0e-5,
         selfcal_maxiter: int = 2000, selfcal_eps: float = 1.0e-6, total_eps: float = 1.0e-2,
         ellipse_th: float = 0.995, cos_th: float = 0.99,
         outlier_amp_bounds: tuple[float, float] = (0.5, 1.5),
@@ -394,6 +420,18 @@ def run_staged_parameter_search(
               passed to every mu-search round's gain_outlier_penalty();
               see search_gain_regularizers's docstring for why this
               matters on top of the target dispersion alone
+    final_imaging_maxiter, final_imaging_eps -- every lambda-search stage
+              (stage0 and every lambda_roundN) searches at imaging_maxiter/
+              imaging_eps for speed, then re-solves its own winning
+              (l1, ltsv) at these larger/tighter values to actually
+              converge (see search_imaging_regularizers's docstring) --
+              this is also what makes each stage's warm-start handoff to
+              the next meaningful, rather than carrying over whatever
+              unrelated trial Optuna last happened to visit. Defaults
+              (2000, 1e-5) are well above the search-time defaults
+              (300, 1e-4); this recovers the historical reference
+              scripts' own practice of a separate, more-converged solve
+              once parameters are decided (2026-08-22).
 
     Returns the final round's own winning (l1, ltsv, mu_sq, mu_abs,
     gains, image) -- these are mutually consistent in the sense that the
@@ -406,6 +444,7 @@ def run_staged_parameter_search(
         bayesopt_n_startup_trials=bayesopt_n_startup_trials,
         bayesopt_n_search_trials=bayesopt_n_search_trials,
         imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
+        final_imaging_maxiter=final_imaging_maxiter, final_imaging_eps=final_imaging_eps,
         ellipse_th=ellipse_th, cos_th=cos_th,
         nonnegative=nonnegative, scalehyperparam=scalehyperparam,
         imageprefix=imageprefix + '_stage0',
@@ -447,6 +486,7 @@ def run_staged_parameter_search(
             bayesopt_n_startup_trials=bayesopt_n_startup_trials,
             bayesopt_n_search_trials=bayesopt_n_search_trials,
             imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
+            final_imaging_maxiter=final_imaging_maxiter, final_imaging_eps=final_imaging_eps,
             ellipse_th=ellipse_th, cos_th=cos_th,
             nonnegative=nonnegative, scalehyperparam=scalehyperparam,
             imageprefix=f'{imageprefix}_round{round_idx}',

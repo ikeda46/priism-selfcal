@@ -194,6 +194,26 @@ two per-round stage functions) are also usable standalone if you only
 need one of them -- e.g. to re-tune `mu_sq`/`mu_abs` alone with
 `lambda1`/`lambda_tsv` already decided some other way.
 
+**Warm-starting and final convergence.** Every lambda-search stage
+(`stage0` and every `lambda_roundN`) evaluates its Optuna trials at a
+small `imaging_maxiter` for speed, then re-solves its own winning
+`(lambda1, lambda_tsv)` at a much larger `final_imaging_maxiter`/tighter
+`final_imaging_eps` (defaults 2000/1e-5) to actually converge, with
+`overwriteinitialimage=True` -- this is also what the *next* stage warm-
+starts from (priism's `solve()` persists its resulting image as the next
+call's initial condition by default). Two problems this fixes together
+(both found running this on real HD142527 data, 2026-08-22): first, a
+naive re-solve without `overwriteinitialimage=True` leaves whatever
+image Optuna's last (not necessarily best) trial happened to produce as
+the warm start for the next stage, unrelated to the actual winning
+parameters; second, `imaging_maxiter` alone is deliberately too small to
+converge every trial (that's what makes the search affordable), so
+without this explicit high-maxiter re-solve, even the final returned
+image may not be properly converged. This mirrors the historical
+reference workflow's own practice of a separate, more-converged
+production solve once parameters are decided, rather than trusting the
+search's own last solve.
+
 Each stage runs `bayesopt_n_startup_trials + bayesopt_n_search_trials`
 Optuna trials (defaults 20 and 30). **Both matter, not just the total:**
 Optuna's default TPESampler spends its first `n_startup_trials` trials
