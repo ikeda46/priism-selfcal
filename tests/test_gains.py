@@ -124,6 +124,14 @@ def test_gains_construction_matches_naive_reference(seed):
     assert g.gain.shape == (g.gain_num,)
     assert np.all(g.gain == 1.0 + 0.0j)
 
+    # station_ids must recover the *original* (possibly non-contiguous)
+    # station labels from gid_adj_t's compact 0..S-1 station index
+    assert g.station_ids.size == g.st_num
+    recovered_station1 = g.station_ids[g.gid_adj_t[g.vid2gid_st[:, 0], 0]]
+    recovered_station2 = g.station_ids[g.gid_adj_t[g.vid2gid_st[:, 1], 0]]
+    assert np.array_equal(recovered_station1, st1)
+    assert np.array_equal(recovered_station2, st2)
+
 
 @pytest.mark.parametrize("seed", range(20))
 def test_regularizers_matches_naive_sum(seed):

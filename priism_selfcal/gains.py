@@ -55,6 +55,11 @@ class Gains:
         time_tbl  -- (T,) float64 array converting time index -> the actual
                      observation time value
         st_num    -- number of distinct stations (S)
+        station_ids -- (S,) array converting the internal 0..S-1 station
+                     index used in gid_adj_t -> the original station1/
+                     station2 label the caller passed in (e.g. real MS
+                     ANTENNA1/ANTENNA2 values, not necessarily 0..S-1 or
+                     contiguous)
         gain_num  -- number of gains (Gnum); one gain per (station, time)
                      pair that is actually observed -- not necessarily
                      S*T, since a station need not appear at every time
@@ -135,6 +140,11 @@ class Gains:
         self.time_num = T
         self.time_tbl = time_tbl.astype(np.float64)
         self.st_num = S
+        # gid_adj_t[:, 0] and vid2gid_st's station roles are indices 0..S-1
+        # into this array, which recovers the *original* station labels the
+        # caller passed in (e.g. real MS ANTENNA1/ANTENNA2 values, which
+        # need not be contiguous or start at 0).
+        self.station_ids = station_all
         self.gain_num = Gnum
         self.gain = np.ones(Gnum, dtype=np.complex128)
         self.gid_adj_t = gid_adj_t
@@ -165,3 +175,98 @@ class Gains:
         abs_term = np.sum(w_at * (np.abs(g1) - np.abs(g2)) ** 2)
 
         return GainRegularizers(sq_term=sq_term, abs_term=abs_term)
+
+    def plot_gains(self, fname=None, ax=None):
+        """
+        Scatter plot of every gain in the complex plane, with a unit
+        circle for reference (real ALMA gains are expected to cluster
+        near 1+0j). Mirrors old/python/sparseimaging/selfcal.py::
+        Gains.plot_gains. CASA's plotms can produce the same plot from a
+        caltable via xaxis='real', yaxis='imag'.
+        """
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(5, 5), facecolor='white')
+        else:
+            fig = ax.figure
+
+        theta = np.linspace(0, 2 * np.pi, 100)
+        ax.plot(self.gain.real, self.gain.imag, '.')
+        ax.plot(np.cos(theta), np.sin(theta), 'k--', linewidth=0.3)
+        ax.axhline(0, color='k', linestyle='--', linewidth=0.2)
+        ax.axvline(0, color='k', linestyle='--', linewidth=0.2)
+
+        ax.set_xticks(np.linspace(-1, 1, 3))
+        ax.set_yticks(np.linspace(-1, 1, 3))
+        ax.set_xlim(-1.4, 1.4)
+        ax.set_ylim(-1.4, 1.4)
+        ax.set_xlabel('real', fontsize=14)
+        ax.set_ylabel('imaginary', fontsize=14)
+        ax.set_aspect('equal')
+        fig.tight_layout()
+
+        if fname is not None:
+            fig.savefig(fname)
+
+        return ax
+
+    def plot_station_gains(self, fname=None, station_names=None, ncols=4):
+        """
+        Per-station time series of |gain| and phase(gain), one subplot per
+        station. Mirrors old/python/sparseimaging/selfcal.py::
+        Gains.plot_station_gains (fixed an off-by-one there that dropped
+        each station's last time sample). CASA's plotcal/plotms produce
+        the same kind of plot (amp/phase vs. time) from a caltable.
+
+        station_names -- optional array/mapping from the original station
+                          label (see station_ids) to a display name, e.g.
+                          real antenna names from the MS's ANTENNA table.
+        """
+        import matplotlib.pyplot as plt
+
+        nrows = int(np.ceil(self.st_num / ncols))
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=(5 * ncols, 4 * nrows), facecolor='white', squeeze=False
+        )
+
+        for st in range(self.st_num):
+            ax1 = axes[st // ncols, st % ncols]
+
+            mask = self.gid_adj_t[:, 0] == st
+            t = self.time_tbl[self.gid_adj_t[mask, 1]]
+            g = self.gain[mask]
+            order = np.argsort(t)
+            t, g = t[order], g[order]
+
+            ax1.plot(t, np.abs(g), 'C0.', label=r'$|gain|$')
+            ax1.set_xlim(self.time_tbl.min(), self.time_tbl.max())
+            ax1.set_ylim(0, max(np.abs(g).max() * 1.2, 1e-12))
+
+            ax2 = ax1.twinx()
+            ax2.plot(t, np.angle(g), 'C1.', label='phase')
+            ax2.set_xlim(self.time_tbl.min(), self.time_tbl.max())
+            ax2.set_ylim(-np.pi, np.pi)
+
+            h1, l1 = ax1.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            ax1.legend(h1 + h2, l1 + l2, loc='lower right')
+
+            label = self.station_ids[st]
+            if station_names is not None:
+                label = station_names[label]
+            ax1.set_title(f'station {label}')
+            ax1.set_xlabel('t')
+            ax1.set_ylabel(r'|gain|')
+            ax2.grid(True)
+            ax2.set_ylabel('phase(gain)')
+
+        for st in range(self.st_num, nrows * ncols):
+            axes[st // ncols, st % ncols].axis('off')
+
+        fig.tight_layout()
+
+        if fname is not None:
+            fig.savefig(fname)
+
+        return fig
