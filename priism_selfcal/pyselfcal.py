@@ -238,29 +238,50 @@ def update_g(
     return gnew
 
 
-def estimate_rho_init(wvis: np.ndarray, vid2gid_st: np.ndarray, Gnum: int, scale: float = 1.0) -> float:
-    """Estimate a rho_init comparable in scale to the data term's own
-    per-gain curvature (the data-only contribution to update_g's a_vec,
-    evaluated at g=h=ginit so h_pow=1), rather than leaving rho_init at an
-    arbitrary fixed value that may be many orders of magnitude away from
-    the data scale (e.g. at high SNR / small vis_std, the data term can be
-    ~1e5-1e6 while a naive rho_init=1 needs ~3 outer x100 jumps just to
-    become comparable -- see priism-selfcal's notes on the ADMM penalty
+def estimate_rho(wvis: np.ndarray, vid2gid_st: np.ndarray, h: np.ndarray, scale: float = 1.0) -> float:
+    """Estimate a rho comparable in scale to the data term's own per-gain
+    curvature at the *current* h -- i.e. the data-only contribution to
+    update_g's a_vec (a_vec(gid1) += pow_wvis(i)*h_pow(gid2)), evaluated
+    exactly as update_g would, rather than leaving rho at an arbitrary
+    fixed value that may be many orders of magnitude away from the data
+    scale (e.g. at high SNR / small vis_std, the data term can be ~1e5-1e6
+    while a naive rho=1 needs ~3 outer x100 jumps just to become
+    comparable -- see priism-selfcal's notes on the ADMM penalty
     continuation, 2026-08-20).
+
+    Used both to pick rho_init (call with h=ginit) and, per outer stage
+    with the *actual* current h instead of blindly multiplying by
+    RHOSTEP, to recalibrate rho between stages (2026-08-21) -- the
+    initial-h estimate assumes h_pow~1, which is only exactly right at
+    the very first call; recomputing from the real h after each stage
+    corrects for that and for any per-gain curvature the single upfront
+    estimate didn't capture.
 
     `scale` lets the caller push the estimate up/down; 1.0 matches the
     data term's own typical magnitude.
     """
+    Gnum = h.size
     pow_wvis = np.abs(wvis) ** 2
+    h_pow = np.abs(h) ** 2
+    gid1 = vid2gid_st[:, 0]
+    gid2 = vid2gid_st[:, 1]
+
     a_data = np.zeros(Gnum, dtype=np.float64)
-    np.add.at(a_data, vid2gid_st[:, 0], pow_wvis)
-    np.add.at(a_data, vid2gid_st[:, 1], pow_wvis)
+    np.add.at(a_data, gid1, pow_wvis * h_pow[gid2])
+    np.add.at(a_data, gid2, pow_wvis * h_pow[gid1])
     a_data *= 0.5  # matches update_g's a_vec /= 2.0 scaling of the data term
 
     nonzero = a_data[a_data > 0]
     if nonzero.size == 0:
         return scale
     return float(scale * np.median(nonzero))
+
+
+def estimate_rho_init(wvis: np.ndarray, vid2gid_st: np.ndarray, Gnum: int, scale: float = 1.0) -> float:
+    """Convenience wrapper for estimate_rho() at h_pow=1 (e.g. ginit=1+0j,
+    the usual starting point). See estimate_rho's docstring.
+    """
+    return estimate_rho(wvis, vid2gid_st, np.ones(Gnum, dtype=np.complex128), scale=scale)
 
 
 def self_calibration(
@@ -289,7 +310,12 @@ def self_calibration(
     `rho_init`: if None, estimated from the data scale via
     estimate_rho_init (recommended default, see that function's docstring);
     pass an explicit float to pin it (matches the original C++ behavior,
-    which always required a caller-supplied value).
+    which always required a caller-supplied value). Between outer
+    (rho-continuation) stages, instead of blindly multiplying by RHOSTEP,
+    rho is recalibrated via estimate_rho() using the actual current h --
+    but never allowed to grow slower than the RHOSTEP schedule would, so
+    the original guarantee of eventual (g, h) consensus within MAXOUTER
+    stages still holds (2026-08-21).
 
     `eps` is applied as a *relative* threshold on the inner loop's cost
     change (abs(cost - cost_new) < eps * max(1, abs(cost_new))), not an
@@ -366,7 +392,11 @@ def self_calibration(
             converged = True
             break
 
-        rho = RHOSTEP * rho
+        # Recalibrate rho from the actual current h rather than blindly
+        # multiplying by RHOSTEP -- but never let it grow slower than the
+        # RHOSTEP schedule would, to keep the guarantee of eventually
+        # reaching (g, h) consensus within MAXOUTER stages.
+        rho = max(estimate_rho(wvis, vid2gid_st, h), RHOSTEP * rho)
         cost = cost_new
 
     if not converged:
