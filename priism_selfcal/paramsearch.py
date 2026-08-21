@@ -55,7 +55,9 @@ gains) is already available in memory from the stages themselves.
 """
 from __future__ import annotations
 
+import glob
 import math
+import os
 from collections import namedtuple
 
 import numpy as np
@@ -194,10 +196,13 @@ def search_imaging_regularizers(
     ellipse_th, cos_th -- default to the exact values used in Ikeda et
               al. 2025 section 4 (0.995, 0.99), which differ slightly
               from priism's own general-purpose default of (0.99, 0.99)
-    imageprefix -- passed to optimizeparameters(); writes FITS files as
-              a side effect (imagepolicy='best' below removes all but
-              the final one). Point this at a scratch directory if
-              calling from a test or a batch job.
+    imageprefix -- passed to optimizeparameters(); writes one FITS file
+              per trial as a side effect. All of them (plus the
+              "<imageprefix>.<suffix>" best-image copy optimizeparameters()
+              itself makes) are removed once this function has extracted
+              the winning image array, regardless of optimizer/criterion.
+              Point this at a scratch directory if calling from a test or
+              a batch job.
 
     Returns the winning (l1, ltsv) together with the resulting image,
     obtained via one extra explicit solve() at that point (rather than
@@ -208,6 +213,15 @@ def search_imaging_regularizers(
     l1_list = _log_grid(l1_exp_range)
     ltsv_list = _log_grid(ltsv_exp_range)
 
+    # imagepolicy='best' is avoided here: optimizeparameters()'s own
+    # cleanup deletes every entry in its internal trial-image list
+    # without deduplicating it first, so it raises FileNotFoundError
+    # whenever optimizer='bayesian' (Optuna) samples the same grid point
+    # twice -- a pre-existing priism bug, unrelated to self-cal, hit
+    # while running this package's staged search on real data
+    # (2026-08-21). imagepolicy='full' skips that internal cleanup
+    # entirely; we do our own (glob-based, so duplicate paths are naturally
+    # deduplicated) cleanup below instead.
     best = imager.optimizeparameters(
         l1_list=l1_list, ltsv_list=ltsv_list,
         criterion='ellipsoid', optimizer='bayesian',
@@ -215,13 +229,19 @@ def search_imaging_regularizers(
         ellipse_th=ellipse_th, cos_th=cos_th,
         maxiter=imaging_maxiter, eps=imaging_eps,
         nonnegative=nonnegative, scalehyperparam=scalehyperparam,
-        imageprefix=imageprefix, imagepolicy='best', summarize=False,
+        imageprefix=imageprefix, imagepolicy='full', summarize=False,
     )
     best_l1, best_ltsv = best['L1'], best['Ltsv']
 
     imager.solve(best_l1, best_ltsv, maxiter=imaging_maxiter, eps=imaging_eps,
                  nonnegative=nonnegative, scalehyperparam=scalehyperparam)
     image = np.squeeze(imager.imagearray.data)
+
+    for leftover in glob.glob(imageprefix + '*'):
+        try:
+            os.remove(leftover)
+        except OSError:
+            pass
 
     return ImagingSearchResult(l1=best_l1, ltsv=best_ltsv, image=image)
 
