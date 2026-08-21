@@ -31,27 +31,42 @@ and instead alternates two independent 2-parameter searches:
     fixed -- new in this module, since priism itself has no self-cal
     concept.
 
-Sequencing (verified 2026-08-21 against the actual historical driver
-scripts in old/python/*_step0.py..step3.py via their hardcoded-constant
-provenance chain, not the paper's own text -- the paper's "we repeated
-steps 2 and 3 for 10 iterations" turned out to be a mislabeling that
-reuses wording from section 3.3's *inner* TotalImaging loop description,
-not a literal 10x outer repeat; the surviving code only ever ran a
-single pass):
+Sequencing follows the paper's own explicit section 3.4 procedure:
 
-  stage 0: mu search from scratch (gain initialized to 1+0j each trial),
-           lambda1=lambda_tsv=1.0 fixed.
-  stage 1: lambda search (priism's ellipsoid criterion, OnlyImaging-style
-           -- no self-cal loop), gain fixed to stage 0's winner.
-  stage 2: mu search again, lambda fixed to stage 1's winner, search
+  "(1) Find the best combination of {lambda1, lambda2} for the
+       visibility without self-calibration.
+   (2) Fix {lambda1, lambda2} for those found in step 1 and search the
+       best combination of {mu1, mu2}.
+   (3) Fix {mu1, mu2} for those found in step 2 and search the best
+       combination of {lambda1, lambda2}."
+
+i.e.:
+
+  stage 0: lambda search with gain fixed at 1+0j -- no self-calibration
+           at all yet, priism's ellipsoid criterion on the raw
+           (uncorrected) visibility.
+  stage 1: mu search from scratch (gain re-initialized to 1+0j every
+           trial), lambda fixed to stage 0's winner.
+  stage 2: lambda search again, gain fixed to stage 1's winner, search
            range narrowed to stage 0's winner +/- narrow_width decades.
-  stage 3: lambda search again, mu fixed to stage 2's winner, search
-           range narrowed to stage 1's winner +/- narrow_width decades.
 
-The result is stage 3's own winning (lambda1, lambda_tsv) together with
-stage 2's own winning (mu_sq, mu_abs) and gains -- no extra "production"
-TotalImaging run is performed afterward, since all needed state (image,
-gains) is already available in memory from the stages themselves.
+`n_refine_rounds` (default 1) controls whether stages 1-2 repeat: the
+paper allows repeating them ("we repeated steps 2 and 3 ... because the
+image does not change greatly after a few iterations"), but the actual
+historical driver scripts (old/python/*_step0.py..step3.py) only ever
+ran a single round in practice, traced via their hardcoded-constant
+provenance chain (2026-08-21) -- n_refine_rounds=1 matches that; raise
+it (e.g. to 2) to repeat the mu/lambda refinement an extra time.
+
+An earlier version of this module mistakenly started from a mu search
+(following old/python's own "step0.py" naming, which already assumes a
+fixed lambda=1 to bootstrap its mu search -- i.e. it *is* stage 1 above,
+not stage 0) rather than the paper's actual stage 0. Corrected 2026-08-21.
+
+The result is the final round's own winning (lambda1, lambda_tsv, mu_sq,
+mu_abs, gains, image) -- no extra "production" TotalImaging run is
+performed afterward, since all needed state is already available in
+memory from the stages themselves.
 """
 from __future__ import annotations
 
@@ -255,10 +270,9 @@ def run_staged_parameter_search(
         target: GainTarget,
         l1_exp_range=(-15, 15), ltsv_exp_range=(-15, 15),
         mu_sq_exp_range=(-6, 4), mu_abs_exp_range=(-3, 7),
-        narrow_width: int = 3,
-        selfcal_num_stage0: int = 3, selfcal_num_stage2: int = 3,
-        bayesopt_maxiter_stage0: int = 30, bayesopt_maxiter_stage1: int = 30,
-        bayesopt_maxiter_stage2: int = 30, bayesopt_maxiter_stage3: int = 30,
+        narrow_width: int = 3, n_refine_rounds: int = 1,
+        selfcal_num: int = 3,
+        bayesopt_maxiter_lambda: int = 30, bayesopt_maxiter_mu: int = 30,
         imaging_maxiter: int = 300, imaging_eps: float = 1.0e-4,
         selfcal_maxiter: int = 2000, selfcal_eps: float = 1.0e-6, total_eps: float = 1.0e-2,
         ellipse_th: float = 0.995, cos_th: float = 0.99,
@@ -266,89 +280,94 @@ def run_staged_parameter_search(
         imageprefix: str = 'image_paramsearch',
 ) -> StagedSearchResult:
     """
-    0 -> 1 -> 2 -> 1 staged search for (lambda1, lambda_tsv, mu_sq,
-    mu_abs) -- see this module's docstring for the stage definitions and
-    why the sequence stops after stage 3 rather than repeating further.
+    Stage 0 -> (stage 1 -> stage 2) x n_refine_rounds staged search for
+    (lambda1, lambda_tsv, mu_sq, mu_abs) -- see this module's docstring
+    for the stage definitions, and why stage 0 is a lambda search (not a
+    mu search).
 
     imager -- a priism SparseModelingImager with .working_set.u/v/weight
               already set from the raw (uncorrected) visibility; its
               rdata/idata get overwritten in place as the stages proceed
+              (stage 0 runs directly against the untouched raw values,
+              since gain=1+0j means no correction at all)
     antenna1, antenna2, time, vis_org, sigma -- see
               search_gain_regularizers/msreader.read_ms_for_selfcal
     target -- gain dispersion target (see GAIN_TARGETS for the two
               combinations from Ikeda et al. 2025)
-    narrow_width -- decades +/- around the previous stage's winner used
-              for stage 2/3's search ranges (matches the historical
-              driver scripts' own choice of 3)
-    selfcal_num_stage0, selfcal_num_stage2 -- kept as separate arguments
-              (stage 0 solves from scratch, stage 2 refines) but default
-              to the same value, matching the same TotalImaging round
-              budget throughout unless deliberately overridden
-    bayesopt_maxiter_stage{0,1,2,3} -- kept separate per stage for the
-              same reason; all default to 30 (Ikeda et al. 2025's own
-              trial count)
+    narrow_width -- decades +/- around the previous round's winner used
+              to narrow both the lambda and mu search ranges from the
+              second round onward (matches the historical driver
+              scripts' own choice of 3)
+    n_refine_rounds -- how many times to run (mu search, lambda search);
+              default 1 matches the historical driver scripts' actual
+              practice (see module docstring); the paper itself allows
+              repeating further
+    selfcal_num -- passed to every mu-search round's totalimaging.run()
+              calls
+    bayesopt_maxiter_lambda, bayesopt_maxiter_mu -- Optuna trial counts
+              for the lambda-search and mu-search stages respectively;
+              both default to 30 (Ikeda et al. 2025's own trial count)
 
-    Returns the final (l1, ltsv) from stage 3 and (mu_sq, mu_abs, gains)
-    from stage 2 -- these are mutually consistent in the sense that
-    stage 3's own winning trial is imaged with stage 2's gain correction
-    already applied, matching how the historical procedure terminated
-    (no separate non-optimized "production" run needed; see this
-    module's docstring).
+    Returns the final round's own winning (l1, ltsv, mu_sq, mu_abs,
+    gains, image) -- these are mutually consistent in the sense that the
+    final lambda search's own winning trial is imaged with that round's
+    gain correction already applied, so no separate non-optimized
+    "production" run is needed afterward.
     """
-    stage0 = search_gain_regularizers(
-        imager, antenna1, antenna2, time, vis_org, sigma,
-        l1=1.0, ltsv=1.0, target=target,
-        mu_sq_exp_range=mu_sq_exp_range, mu_abs_exp_range=mu_abs_exp_range,
-        selfcal_num=selfcal_num_stage0, bayesopt_maxiter=bayesopt_maxiter_stage0,
-        imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
-        selfcal_maxiter=selfcal_maxiter, selfcal_eps=selfcal_eps, total_eps=total_eps,
-        nonnegative=nonnegative, scalehyperparam=scalehyperparam, nthreads=nthreads,
-    )
-
-    vis_cal = update_visibility(stage0.gains, vis_org)
-    imager.working_set.rdata = vis_cal.real.copy()
-    imager.working_set.idata = vis_cal.imag.copy()
-    stage1 = search_imaging_regularizers(
+    stage0 = search_imaging_regularizers(
         imager, l1_exp_range=l1_exp_range, ltsv_exp_range=ltsv_exp_range,
-        bayesopt_maxiter=bayesopt_maxiter_stage1,
+        bayesopt_maxiter=bayesopt_maxiter_lambda,
         imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
         ellipse_th=ellipse_th, cos_th=cos_th,
         nonnegative=nonnegative, scalehyperparam=scalehyperparam,
-        imageprefix=imageprefix + '_stage1',
+        imageprefix=imageprefix + '_stage0',
     )
+    stages = {'stage0': stage0}
 
-    log_mu_sq0 = _nearest_exponent(stage0.mu_sq)
-    log_mu_abs0 = _nearest_exponent(stage0.mu_abs)
-    stage2 = search_gain_regularizers(
-        imager, antenna1, antenna2, time, vis_org, sigma,
-        l1=stage1.l1, ltsv=stage1.ltsv, target=target,
-        mu_sq_exp_range=(log_mu_sq0 - narrow_width, log_mu_sq0 + narrow_width),
-        mu_abs_exp_range=(log_mu_abs0 - narrow_width, log_mu_abs0 + narrow_width),
-        selfcal_num=selfcal_num_stage2, bayesopt_maxiter=bayesopt_maxiter_stage2,
-        imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
-        selfcal_maxiter=selfcal_maxiter, selfcal_eps=selfcal_eps, total_eps=total_eps,
-        nonnegative=nonnegative, scalehyperparam=scalehyperparam, nthreads=nthreads,
-    )
+    current_l1, current_ltsv = stage0.l1, stage0.ltsv
+    cur_mu_sq_range, cur_mu_abs_range = mu_sq_exp_range, mu_abs_exp_range
+    mu_stage = None
+    lambda_stage = stage0
 
-    vis_cal = update_visibility(stage2.gains, vis_org)
-    imager.working_set.rdata = vis_cal.real.copy()
-    imager.working_set.idata = vis_cal.imag.copy()
-    log_l1_1 = _nearest_exponent(stage1.l1)
-    log_ltsv_1 = _nearest_exponent(stage1.ltsv)
-    stage3 = search_imaging_regularizers(
-        imager,
-        l1_exp_range=(log_l1_1 - narrow_width, log_l1_1 + narrow_width),
-        ltsv_exp_range=(log_ltsv_1 - narrow_width, log_ltsv_1 + narrow_width),
-        bayesopt_maxiter=bayesopt_maxiter_stage3,
-        imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
-        ellipse_th=ellipse_th, cos_th=cos_th,
-        nonnegative=nonnegative, scalehyperparam=scalehyperparam,
-        imageprefix=imageprefix + '_stage3',
-    )
+    for round_idx in range(n_refine_rounds):
+        mu_stage = search_gain_regularizers(
+            imager, antenna1, antenna2, time, vis_org, sigma,
+            l1=current_l1, ltsv=current_ltsv, target=target,
+            mu_sq_exp_range=cur_mu_sq_range, mu_abs_exp_range=cur_mu_abs_range,
+            selfcal_num=selfcal_num, bayesopt_maxiter=bayesopt_maxiter_mu,
+            imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
+            selfcal_maxiter=selfcal_maxiter, selfcal_eps=selfcal_eps, total_eps=total_eps,
+            nonnegative=nonnegative, scalehyperparam=scalehyperparam, nthreads=nthreads,
+        )
+        stages[f'mu_round{round_idx}'] = mu_stage
+
+        vis_cal = update_visibility(mu_stage.gains, vis_org)
+        imager.working_set.rdata = vis_cal.real.copy()
+        imager.working_set.idata = vis_cal.imag.copy()
+
+        log_l1 = _nearest_exponent(current_l1)
+        log_ltsv = _nearest_exponent(current_ltsv)
+        lambda_stage = search_imaging_regularizers(
+            imager,
+            l1_exp_range=(log_l1 - narrow_width, log_l1 + narrow_width),
+            ltsv_exp_range=(log_ltsv - narrow_width, log_ltsv + narrow_width),
+            bayesopt_maxiter=bayesopt_maxiter_lambda,
+            imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
+            ellipse_th=ellipse_th, cos_th=cos_th,
+            nonnegative=nonnegative, scalehyperparam=scalehyperparam,
+            imageprefix=f'{imageprefix}_round{round_idx}',
+        )
+        stages[f'lambda_round{round_idx}'] = lambda_stage
+
+        current_l1, current_ltsv = lambda_stage.l1, lambda_stage.ltsv
+        log_mu_sq = _nearest_exponent(mu_stage.mu_sq)
+        log_mu_abs = _nearest_exponent(mu_stage.mu_abs)
+        cur_mu_sq_range = (log_mu_sq - narrow_width, log_mu_sq + narrow_width)
+        cur_mu_abs_range = (log_mu_abs - narrow_width, log_mu_abs + narrow_width)
 
     return StagedSearchResult(
-        l1=stage3.l1, ltsv=stage3.ltsv,
-        mu_sq=stage2.mu_sq, mu_abs=stage2.mu_abs,
-        gains=stage2.gains, image=stage3.image,
-        stages=dict(stage0=stage0, stage1=stage1, stage2=stage2, stage3=stage3),
+        l1=current_l1, ltsv=current_ltsv,
+        mu_sq=mu_stage.mu_sq, mu_abs=mu_stage.mu_abs,
+        gains=mu_stage.gains, image=lambda_stage.image,
+        stages=stages,
     )

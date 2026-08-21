@@ -165,20 +165,40 @@ def test_run_staged_parameter_search_end_to_end(tmp_path):
         im, p['st1'], p['st2'], p['time_arr'], p['vis_org'], p['sigma'], target,
         l1_exp_range=(-4, 2), ltsv_exp_range=(-4, 2),
         mu_sq_exp_range=(-2, 2), mu_abs_exp_range=(-2, 2),
-        narrow_width=1,
-        selfcal_num_stage0=2, selfcal_num_stage2=2,
-        bayesopt_maxiter_stage0=3, bayesopt_maxiter_stage1=3,
-        bayesopt_maxiter_stage2=3, bayesopt_maxiter_stage3=3,
+        narrow_width=1, n_refine_rounds=1,
+        selfcal_num=2, bayesopt_maxiter_lambda=3, bayesopt_maxiter_mu=3,
         imaging_maxiter=100, selfcal_maxiter=500,
         imageprefix=str(tmp_path / 'staged'),
     )
 
-    assert set(result.stages.keys()) == {'stage0', 'stage1', 'stage2', 'stage3'}
-    # stage 2/3's search ranges should be centered on stage 0/1's winners
-    # (narrow_width=1 decade here), i.e. within 10x of them
-    assert abs(np.log10(result.mu_sq) - np.log10(result.stages['stage0'].mu_sq)) <= 1
-    assert abs(np.log10(result.l1) - np.log10(result.stages['stage1'].l1)) <= 1
+    assert set(result.stages.keys()) == {'stage0', 'mu_round0', 'lambda_round0'}
+    # mu_round0/lambda_round0's search ranges should be centered on
+    # stage0's winner (narrow_width=1 decade here), i.e. within 10x of it
+    assert abs(np.log10(result.mu_sq) - np.log10(result.stages['mu_round0'].mu_sq)) <= 1
+    assert abs(np.log10(result.l1) - np.log10(result.stages['stage0'].l1)) <= 1
 
     amp = np.abs(result.gains.gain)
     assert amp.min() > 0.5 and amp.max() < 1.5
     assert result.image.shape == (p['nx'], p['ny'])
+
+
+def test_run_staged_parameter_search_supports_multiple_refine_rounds(tmp_path):
+    p = _make_problem()
+    im = _make_imager(p)
+    target = paramsearch.GAIN_TARGETS['large_variance']
+
+    result = paramsearch.run_staged_parameter_search(
+        im, p['st1'], p['st2'], p['time_arr'], p['vis_org'], p['sigma'], target,
+        l1_exp_range=(-4, 2), ltsv_exp_range=(-4, 2),
+        mu_sq_exp_range=(-2, 2), mu_abs_exp_range=(-2, 2),
+        narrow_width=1, n_refine_rounds=2,
+        selfcal_num=2, bayesopt_maxiter_lambda=2, bayesopt_maxiter_mu=2,
+        imaging_maxiter=100, selfcal_maxiter=500,
+        imageprefix=str(tmp_path / 'staged2'),
+    )
+
+    assert set(result.stages.keys()) == {
+        'stage0', 'mu_round0', 'lambda_round0', 'mu_round1', 'lambda_round1'
+    }
+    amp = np.abs(result.gains.gain)
+    assert amp.min() > 0.5 and amp.max() < 1.5
