@@ -65,6 +65,34 @@ def test_gain_dispersion_cost_is_zero_at_target():
     assert cost < 0.01, f'cost should be near 0 when dispersion matches target exactly, got {cost}'
 
 
+def test_gain_outlier_penalty_is_zero_within_bounds():
+    gain = np.array([1.0, 0.9, 1.1, 0.6 + 0.1j, 1.4 - 0.1j])
+    assert np.all(np.abs(gain) >= 0.5) and np.all(np.abs(gain) <= 1.5)
+    penalty = paramsearch.gain_outlier_penalty(gain)
+    assert penalty == 0.0
+
+
+def test_gain_outlier_penalty_penalizes_amplitude_outlier():
+    within_bounds = np.full(10, 1.0 + 0j)
+    with_outlier = within_bounds.copy()
+    with_outlier[0] = 2.43 + 0j  # matches the real HD142527 outlier that motivated this
+
+    assert paramsearch.gain_outlier_penalty(within_bounds) == 0.0
+    penalty = paramsearch.gain_outlier_penalty(with_outlier)
+    assert penalty == (2.43 - 1.5) ** 2
+
+
+def test_gain_outlier_penalty_penalizes_undershoot_and_phase():
+    gain = np.array([0.3 + 0j])  # amplitude below the lower bound
+    penalty = paramsearch.gain_outlier_penalty(gain, amp_bounds=(0.5, 1.5))
+    assert np.isclose(penalty, (0.5 - 0.3) ** 2)
+
+    # a gain with |gain|=1 but phase 120 deg, outside the default 90 deg bound
+    gain2 = np.array([np.exp(1j * np.radians(120.0))])
+    penalty2 = paramsearch.gain_outlier_penalty(gain2)
+    assert np.isclose(penalty2, (120.0 - 90.0) ** 2)
+
+
 def _make_problem(nx=24, ny=24, n_stations=6, n_times=5, sigma_val=0.02, seed=0):
     rng = np.random.default_rng(seed)
 

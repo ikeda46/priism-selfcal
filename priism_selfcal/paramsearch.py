@@ -123,6 +123,47 @@ def gain_dispersion_cost(gain: np.ndarray, target: GainTarget) -> float:
     return (sigma_ph / target.sigma_ph - 1.0) ** 2 + (sigma_amp / target.sigma_amp - 1.0) ** 2
 
 
+def gain_outlier_penalty(
+        gain: np.ndarray,
+        amp_bounds: tuple[float, float] = (0.5, 1.5),
+        phase_bound_deg: float = 90.0,
+) -> float:
+    """Penalize any *individual* gain whose amplitude/phase falls outside
+    the given bounds -- not part of Ikeda et al. 2025's eq. 17, which only
+    scores the aggregate (population) standard deviation and can be
+    satisfied by a solution that still contains a few extreme outliers.
+
+    Confirmed 2026-08-21 on real HD142527 data: a mu_sq/mu_abs combination
+    (1e3/1e4) gave sigma_amp=0.092, close to the 0.10 target, while
+    individual |gain| ranged up to 2.43 -- a value gain_dispersion_cost
+    alone has no way to penalize, since a handful of outliers barely move
+    the population standard deviation. Real ALMA gains should stay near
+    1+0j (see this package's own test/README conventions, which already
+    use amp in [0.5, 1.5] as the "physically plausible" bound); this
+    penalty makes the mu search actively avoid solutions that violate
+    that expectation, on top of (not instead of) hitting the target
+    dispersion.
+
+    amp_bounds -- (low, high) acceptable |gain| range; anything outside
+              this is squared-hinge penalized
+    phase_bound_deg -- acceptable |angle(gain)| range in degrees, symmetric
+              around 0; deliberately looser than amp_bounds since large
+              overall phase offsets are less immediately implausible than
+              large amplitude excursions (a global phase reference is
+              somewhat arbitrary), but a truly wild individual outlier
+              should still be penalized
+    """
+    amp = np.abs(gain)
+    low, high = amp_bounds
+    amp_over = np.maximum(amp - high, 0.0)
+    amp_under = np.maximum(low - amp, 0.0)
+
+    phase_deg = np.degrees(np.angle(gain))
+    phase_over = np.maximum(np.abs(phase_deg) - phase_bound_deg, 0.0)
+
+    return float(np.sum(amp_over ** 2) + np.sum(amp_under ** 2) + np.sum(phase_over ** 2))
+
+
 def _log_grid(exp_range):
     low, high = exp_range
     return (10.0 ** np.arange(low, high + 1)).tolist()
@@ -137,12 +178,18 @@ def search_gain_regularizers(
         imaging_maxiter: int = 300, imaging_eps: float = 1.0e-4,
         selfcal_maxiter: int = 2000, selfcal_eps: float = 1.0e-6,
         total_eps: float = 1.0e-2,
+        outlier_amp_bounds: tuple[float, float] = (0.5, 1.5),
+        outlier_phase_bound_deg: float = 90.0,
+        outlier_penalty_scale: float = 100.0,
         nonnegative: bool = True, scalehyperparam: bool = False, nthreads: int = 1,
 ) -> GainSearchResult:
     """
     Search (mu_sq, mu_abs) via Optuna: each trial runs totalimaging.run()
     from fresh (gain=1+0j) initial gains with l1/ltsv held fixed, and is
-    scored by gain_dispersion_cost() against `target` (eq. 17).
+    scored by gain_dispersion_cost() against `target` (eq. 17) plus
+    outlier_penalty_scale * gain_outlier_penalty() (2026-08-21 addition,
+    not in the paper -- see gain_outlier_penalty's docstring for why the
+    aggregate-only eq. 17 criterion isn't enough on its own).
 
     imager -- a priism SparseModelingImager with .working_set.u/v already
               set (rdata/idata get overwritten every trial by
@@ -164,6 +211,14 @@ def search_gain_regularizers(
               was random, with no Bayesian guidance ever applied).
     bayesopt_n_search_trials -- number of TPE-guided trials run after the
               startup phase
+    outlier_amp_bounds, outlier_phase_bound_deg -- passed to
+              gain_outlier_penalty()
+    outlier_penalty_scale -- weight on gain_outlier_penalty() relative to
+              gain_dispersion_cost(); default 100 deliberately makes even
+              a single bad outlier (e.g. one |gain| at 2x the amp_bounds
+              margin) comparable to or larger than a typical eq.-17
+              mismatch, since the point of this term is to make outliers
+              essentially unacceptable rather than a minor tiebreaker
     selfcal_num, imaging_maxiter, imaging_eps, selfcal_maxiter,
     selfcal_eps, total_eps, nonnegative, scalehyperparam, nthreads --
               passed through to totalimaging.run() every trial
@@ -185,12 +240,17 @@ def search_gain_regularizers(
             selfcal_maxiter=selfcal_maxiter, selfcal_eps=selfcal_eps, total_eps=total_eps,
             nonnegative=nonnegative, scalehyperparam=scalehyperparam, nthreads=nthreads,
         )
-        cost = gain_dispersion_cost(gains.gain, target)
+        dispersion_cost = gain_dispersion_cost(gains.gain, target)
+        outlier_cost = outlier_penalty_scale * gain_outlier_penalty(
+            gains.gain, amp_bounds=outlier_amp_bounds, phase_bound_deg=outlier_phase_bound_deg
+        )
+        cost = dispersion_cost + outlier_cost
 
         if cost < best['cost']:
             best.update(cost=cost, mu_sq=mu_sq, mu_abs=mu_abs, gains=gains, image=result.image)
 
-        print(f'mu_sq={mu_sq:.3g} mu_abs={mu_abs:.3g}: cost={cost:.4g}')
+        print(f'mu_sq={mu_sq:.3g} mu_abs={mu_abs:.3g}: '
+              f'dispersion={dispersion_cost:.4g} outlier={outlier_cost:.4g} cost={cost:.4g}')
         return cost
 
     sampler = optuna.samplers.TPESampler(n_startup_trials=bayesopt_n_startup_trials)
@@ -294,6 +354,9 @@ def run_staged_parameter_search(
         imaging_maxiter: int = 300, imaging_eps: float = 1.0e-4,
         selfcal_maxiter: int = 2000, selfcal_eps: float = 1.0e-6, total_eps: float = 1.0e-2,
         ellipse_th: float = 0.995, cos_th: float = 0.99,
+        outlier_amp_bounds: tuple[float, float] = (0.5, 1.5),
+        outlier_phase_bound_deg: float = 90.0,
+        outlier_penalty_scale: float = 100.0,
         nonnegative: bool = True, scalehyperparam: bool = False, nthreads: int = 1,
         imageprefix: str = 'image_paramsearch',
 ) -> StagedSearchResult:
@@ -327,6 +390,10 @@ def run_staged_parameter_search(
               docstring for why both matter (a too-small n_search_trials
               relative to n_startup_trials means little to no actual
               Bayesian-guided search ever happens)
+    outlier_amp_bounds, outlier_phase_bound_deg, outlier_penalty_scale --
+              passed to every mu-search round's gain_outlier_penalty();
+              see search_gain_regularizers's docstring for why this
+              matters on top of the target dispersion alone
 
     Returns the final round's own winning (l1, ltsv, mu_sq, mu_abs,
     gains, image) -- these are mutually consistent in the sense that the
@@ -360,6 +427,9 @@ def run_staged_parameter_search(
             bayesopt_n_search_trials=bayesopt_n_search_trials,
             imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
             selfcal_maxiter=selfcal_maxiter, selfcal_eps=selfcal_eps, total_eps=total_eps,
+            outlier_amp_bounds=outlier_amp_bounds,
+            outlier_phase_bound_deg=outlier_phase_bound_deg,
+            outlier_penalty_scale=outlier_penalty_scale,
             nonnegative=nonnegative, scalehyperparam=scalehyperparam, nthreads=nthreads,
         )
         stages[f'mu_round{round_idx}'] = mu_stage

@@ -164,7 +164,17 @@ joint 4-D one, following the paper's own explicit section 3.4 procedure:
    every trial). Each trial runs a full `totalimaging.run()` and is
    scored by how close the resulting gains' phase/amplitude standard
    deviation come to `target` (`paramsearch.gain_dispersion_cost`,
-   eq. 17).
+   eq. 17) **plus** a penalty on any individual gain that strays outside
+   `outlier_amp_bounds`/`outlier_phase_bound_deg` (`gain_outlier_penalty`,
+   not in the paper). Eq. 17 alone only scores the *population* standard
+   deviation, which a solution can satisfy while still containing a
+   handful of extreme outliers: confirmed 2026-08-21 on real HD142527
+   data, where `mu_sq=1e3` gave `sigma_amp=0.092` (close to a 0.10
+   target) while individual `|gain|` ranged up to 2.43 -- physically
+   implausible (real ALMA gains stay near `1+0j`) but essentially
+   invisible to eq. 17's aggregate-only view. `outlier_penalty_scale`
+   (default 100) controls how strongly this is enforced relative to
+   hitting the target dispersion.
 3. **lambda_round0** -- fix gains to `mu_round0`'s winner, re-search
    `(lambda1, lambda_tsv)`, narrowed to stage 0's winner +/-
    `narrow_width` decades (default 3, matching the historical scripts).
