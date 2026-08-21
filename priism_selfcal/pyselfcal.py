@@ -238,6 +238,31 @@ def update_g(
     return gnew
 
 
+def estimate_rho_init(wvis: np.ndarray, vid2gid_st: np.ndarray, Gnum: int, scale: float = 1.0) -> float:
+    """Estimate a rho_init comparable in scale to the data term's own
+    per-gain curvature (the data-only contribution to update_g's a_vec,
+    evaluated at g=h=ginit so h_pow=1), rather than leaving rho_init at an
+    arbitrary fixed value that may be many orders of magnitude away from
+    the data scale (e.g. at high SNR / small vis_std, the data term can be
+    ~1e5-1e6 while a naive rho_init=1 needs ~3 outer x100 jumps just to
+    become comparable -- see priism-selfcal's notes on the ADMM penalty
+    continuation, 2026-08-20).
+
+    `scale` lets the caller push the estimate up/down; 1.0 matches the
+    data term's own typical magnitude.
+    """
+    pow_wvis = np.abs(wvis) ** 2
+    a_data = np.zeros(Gnum, dtype=np.float64)
+    np.add.at(a_data, vid2gid_st[:, 0], pow_wvis)
+    np.add.at(a_data, vid2gid_st[:, 1], pow_wvis)
+    a_data *= 0.5  # matches update_g's a_vec /= 2.0 scaling of the data term
+
+    nonzero = a_data[a_data > 0]
+    if nonzero.size == 0:
+        return scale
+    return float(scale * np.median(nonzero))
+
+
 def self_calibration(
         vis: np.ndarray,
         vis_std: np.ndarray,
@@ -250,7 +275,7 @@ def self_calibration(
         Tnum: int,
         lambda_1: float,
         lambda_2: float,
-        rho_init: float,
+        rho_init: float | None,
         maxiter: int,
         eps: float
 ) -> PySelfCalResults:
@@ -260,6 +285,22 @@ def self_calibration(
     `lambda_1`/`lambda_2` here are the gain-smoothness/amplitude
     regularization weights (mu1/mu2 in Ikeda et al. 2025), not the
     imaging L1/TSV weights used elsewhere in this package.
+
+    `rho_init`: if None, estimated from the data scale via
+    estimate_rho_init (recommended default, see that function's docstring);
+    pass an explicit float to pin it (matches the original C++ behavior,
+    which always required a caller-supplied value).
+
+    `eps` is applied as a *relative* threshold on the inner loop's cost
+    change (abs(cost - cost_new) < eps * max(1, abs(cost_new))), not an
+    absolute one. At large absolute cost values (e.g. high-SNR data, where
+    the weighted chi-square term can reach 1e5-1e6), an absolute eps of
+    1e-10 or so is at or below double-precision's representable resolution
+    at that magnitude, causing the inner loop to report "converged" almost
+    immediately even though the solution is still far from optimal --
+    confirmed reproducing bit-for-bit with the original C++ engine on
+    identical inputs, so this was a property of the absolute-eps criterion
+    itself, not a porting bug (see priism-selfcal tests/, 2026-08-20).
     """
     M = vis.size
     Gnum = ginit.size
@@ -267,6 +308,9 @@ def self_calibration(
 
     wvis = vis / vis_std
     wy = y / vis_std
+
+    if rho_init is None:
+        rho_init = estimate_rho_init(wvis, vid2gid_st, Gnum)
 
     g = ginit.astype(np.complex128).copy()
     h = g.copy()
@@ -309,7 +353,7 @@ def self_calibration(
             if i % 100 == 0:
                 logger.debug("Iteration %d: cost is %f", i + 1, cost_new)
 
-            if i > MINITER and abs(cost - cost_new) < eps:
+            if i > MINITER and abs(cost - cost_new) < eps * max(1.0, abs(cost_new)):
                 flag = True
                 break
             cost = cost_new
