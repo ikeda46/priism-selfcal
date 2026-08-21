@@ -73,6 +73,7 @@ def write_gaintable(
         observation_id: int = 0,
         refant: str | None = None,
         overwrite: bool = False,
+        antenna_offset: int = 0,
 ) -> None:
     """
     Write `gains` out to `output_path` as a CASA G-Jones calibration table.
@@ -91,6 +92,14 @@ def write_gaintable(
                   solve (arbitrary choice, does not affect the written
                   values); defaults to the first antenna in the MS
         overwrite -- remove an existing table at output_path first if True
+        antenna_offset -- subtracted from gains.station_ids before writing
+                  ANTENNA1, to undo the offset msreader.read_multi_ms_for_selfcal
+                  applies when combining multiple MSs into one
+                  self-calibration problem (each MS's antenna numbers are
+                  local to that MS; `msname` here identifies which MS this
+                  call is writing a gaintable for, so its own antenna
+                  numbering must be restored). 0 (the default) is correct
+                  for single-MS use, where no offset was ever applied.
     """
     if os.path.exists(output_path):
         if not overwrite:
@@ -116,7 +125,7 @@ def write_gaintable(
     elif current_nrow > Gnum:
         tb.removerows(list(range(Gnum, current_nrow)))
 
-    station = gains.station_ids[gains.gid_adj_t[:, 0]]
+    station = gains.station_ids[gains.gid_adj_t[:, 0]] - antenna_offset
     time_col = gains.time_tbl[gains.gid_adj_t[:, 1]]
 
     tb.putcol('TIME', time_col)
