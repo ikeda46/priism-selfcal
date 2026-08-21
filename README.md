@@ -184,11 +184,29 @@ two per-round stage functions) are also usable standalone if you only
 need one of them -- e.g. to re-tune `mu_sq`/`mu_abs` alone with
 `lambda1`/`lambda_tsv` already decided some other way.
 
-Each stage runs `bayesopt_maxiter_lambda`/`bayesopt_maxiter_mu` Optuna
-trials (both default to 30, matching the paper); each mu-search trial
-runs a full `totalimaging.run()`, so the whole procedure can take a
-while on real data (on 512x512/~50000-visibility HD142527 data, roughly
-an hour for the default single-round search) -- start with small values
-while testing your setup, following this package's test suite
-(`tests/test_paramsearch.py`) as a template for a fast, synthetic-data
-smoke test before running on a real MS.
+Each stage runs `bayesopt_n_startup_trials + bayesopt_n_search_trials`
+Optuna trials (defaults 20 and 30). **Both matter, not just the total:**
+Optuna's default TPESampler spends its first `n_startup_trials` trials
+on pure random sampling before it starts using its surrogate model to
+actually guide the search -- discovered 2026-08-21 running this on real
+data with a 10-trial budget for the mu-search stage, where *every*
+trial turned out to be random (n_startup_trials also defaults to 10),
+i.e. no real Bayesian optimization ever happened. Make sure
+`n_search_trials` is comfortably larger than a token handful, or you're
+just paying for random search. This requires priism's
+`selfcal-gain-metadata` branch to include commit `bcfea6b` or later
+(which added `optimizeparameters`'s `bayesopt_n_startup_trials`
+parameter).
+
+Each mu-search trial runs a full `totalimaging.run()`, so the whole
+procedure can take a while on real data (on 512x512/~50000-visibility
+HD142527 data, roughly an hour per ~50 combined startup+search trials
+per stage) -- start with small values while testing your setup,
+following this package's test suite (`tests/test_paramsearch.py`) as a
+template for a fast, synthetic-data smoke test before running on a real
+MS. Also double-check your search ranges actually bracket a region
+where the lambda search's C1/C2 can reach `ellipse_th`/`cos_th` --
+too-narrow ranges silently produce a "best effort" result that never
+satisfies either soft constraint (also discovered 2026-08-21: a
+HD142527 run with `ltsv_exp_range=(0, 4)` maxed out C1~0.76 against a
+0.995 target, because a much larger lambda_tsv was actually needed).

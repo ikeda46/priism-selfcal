@@ -131,7 +131,8 @@ def test_search_gain_regularizers_picks_grid_value_and_plausible_gains():
         im, p['st1'], p['st2'], p['time_arr'], p['vis_org'], p['sigma'],
         l1=1.0, ltsv=1.0, target=target,
         mu_sq_exp_range=(-2, 2), mu_abs_exp_range=(-2, 2),
-        selfcal_num=2, bayesopt_maxiter=4, imaging_maxiter=100, selfcal_maxiter=500,
+        selfcal_num=2, bayesopt_n_startup_trials=2, bayesopt_n_search_trials=2,
+        imaging_maxiter=100, selfcal_maxiter=500,
     )
 
     assert result.mu_sq in [10.0 ** e for e in range(-2, 3)]
@@ -147,7 +148,7 @@ def test_search_imaging_regularizers_picks_grid_value(tmp_path):
 
     result = paramsearch.search_imaging_regularizers(
         im, l1_exp_range=(-4, 2), ltsv_exp_range=(-4, 2),
-        bayesopt_maxiter=4, imaging_maxiter=100,
+        bayesopt_n_startup_trials=2, bayesopt_n_search_trials=2, imaging_maxiter=100,
         imageprefix=str(tmp_path / 'image_test'),
     )
 
@@ -166,7 +167,7 @@ def test_run_staged_parameter_search_end_to_end(tmp_path):
         l1_exp_range=(-4, 2), ltsv_exp_range=(-4, 2),
         mu_sq_exp_range=(-2, 2), mu_abs_exp_range=(-2, 2),
         narrow_width=1, n_refine_rounds=1,
-        selfcal_num=2, bayesopt_maxiter_lambda=3, bayesopt_maxiter_mu=3,
+        selfcal_num=2, bayesopt_n_startup_trials=2, bayesopt_n_search_trials=1,
         imaging_maxiter=100, selfcal_maxiter=500,
         imageprefix=str(tmp_path / 'staged'),
     )
@@ -192,7 +193,7 @@ def test_run_staged_parameter_search_supports_multiple_refine_rounds(tmp_path):
         l1_exp_range=(-4, 2), ltsv_exp_range=(-4, 2),
         mu_sq_exp_range=(-2, 2), mu_abs_exp_range=(-2, 2),
         narrow_width=1, n_refine_rounds=2,
-        selfcal_num=2, bayesopt_maxiter_lambda=2, bayesopt_maxiter_mu=2,
+        selfcal_num=2, bayesopt_n_startup_trials=1, bayesopt_n_search_trials=1,
         imaging_maxiter=100, selfcal_maxiter=500,
         imageprefix=str(tmp_path / 'staged2'),
     )

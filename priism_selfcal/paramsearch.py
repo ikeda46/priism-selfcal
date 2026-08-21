@@ -132,7 +132,8 @@ def search_gain_regularizers(
         imager, antenna1, antenna2, time, vis_org, sigma,
         l1: float, ltsv: float, target: GainTarget,
         mu_sq_exp_range=(-6, 4), mu_abs_exp_range=(-3, 7),
-        selfcal_num: int = 3, bayesopt_maxiter: int = 30,
+        selfcal_num: int = 3,
+        bayesopt_n_startup_trials: int = 20, bayesopt_n_search_trials: int = 30,
         imaging_maxiter: int = 300, imaging_eps: float = 1.0e-4,
         selfcal_maxiter: int = 2000, selfcal_eps: float = 1.0e-6,
         total_eps: float = 1.0e-2,
@@ -154,6 +155,15 @@ def search_gain_regularizers(
     mu_sq_exp_range, mu_abs_exp_range -- (low, high) decade exponents;
               the search grid is 10**low .. 10**high inclusive, integer
               steps (matches Ikeda et al. 2025's own log-integer encoding)
+    bayesopt_n_startup_trials -- number of purely-random trials Optuna's
+              TPESampler runs before it starts using its surrogate model
+              to guide sampling. Total trials = n_startup + n_search; if
+              n_search were 0 this would just be random search (verified
+              2026-08-21: a 10-trial budget with Optuna's own default
+              n_startup_trials=10 meant *every* trial of a real-data run
+              was random, with no Bayesian guidance ever applied).
+    bayesopt_n_search_trials -- number of TPE-guided trials run after the
+              startup phase
     selfcal_num, imaging_maxiter, imaging_eps, selfcal_maxiter,
     selfcal_eps, total_eps, nonnegative, scalehyperparam, nthreads --
               passed through to totalimaging.run() every trial
@@ -183,8 +193,9 @@ def search_gain_regularizers(
         print(f'mu_sq={mu_sq:.3g} mu_abs={mu_abs:.3g}: cost={cost:.4g}')
         return cost
 
-    study = optuna.create_study()
-    study.optimize(objective, n_trials=bayesopt_maxiter)
+    sampler = optuna.samplers.TPESampler(n_startup_trials=bayesopt_n_startup_trials)
+    study = optuna.create_study(sampler=sampler)
+    study.optimize(objective, n_trials=bayesopt_n_startup_trials + bayesopt_n_search_trials)
 
     return GainSearchResult(
         mu_sq=best['mu_sq'], mu_abs=best['mu_abs'], cost=best['cost'],
@@ -194,7 +205,8 @@ def search_gain_regularizers(
 
 def search_imaging_regularizers(
         imager, l1_exp_range=(-15, 15), ltsv_exp_range=(-15, 15),
-        bayesopt_maxiter: int = 30, imaging_maxiter: int = 500, imaging_eps: float = 1.0e-4,
+        bayesopt_n_startup_trials: int = 20, bayesopt_n_search_trials: int = 30,
+        imaging_maxiter: int = 500, imaging_eps: float = 1.0e-4,
         ellipse_th: float = 0.995, cos_th: float = 0.99,
         nonnegative: bool = True, scalehyperparam: bool = False,
         imageprefix: str = 'image_paramsearch',
@@ -208,6 +220,11 @@ def search_imaging_regularizers(
 
     l1_exp_range, ltsv_exp_range -- (low, high) decade exponents, same
               convention as search_gain_regularizers
+    bayesopt_n_startup_trials, bayesopt_n_search_trials -- see
+              search_gain_regularizers's docstring; passed through to
+              optimizeparameters()'s own bayesopt_n_startup_trials
+              (requires priism's selfcal-gain-metadata branch or later,
+              which added this parameter -- 2026-08-21)
     ellipse_th, cos_th -- default to the exact values used in Ikeda et
               al. 2025 section 4 (0.995, 0.99), which differ slightly
               from priism's own general-purpose default of (0.99, 0.99)
@@ -240,7 +257,8 @@ def search_imaging_regularizers(
     best = imager.optimizeparameters(
         l1_list=l1_list, ltsv_list=ltsv_list,
         criterion='ellipsoid', optimizer='bayesian',
-        bayesopt_maxiter=bayesopt_maxiter,
+        bayesopt_maxiter=bayesopt_n_startup_trials + bayesopt_n_search_trials,
+        bayesopt_n_startup_trials=bayesopt_n_startup_trials,
         ellipse_th=ellipse_th, cos_th=cos_th,
         maxiter=imaging_maxiter, eps=imaging_eps,
         nonnegative=nonnegative, scalehyperparam=scalehyperparam,
@@ -272,7 +290,7 @@ def run_staged_parameter_search(
         mu_sq_exp_range=(-6, 4), mu_abs_exp_range=(-3, 7),
         narrow_width: int = 3, n_refine_rounds: int = 1,
         selfcal_num: int = 3,
-        bayesopt_maxiter_lambda: int = 30, bayesopt_maxiter_mu: int = 30,
+        bayesopt_n_startup_trials: int = 20, bayesopt_n_search_trials: int = 30,
         imaging_maxiter: int = 300, imaging_eps: float = 1.0e-4,
         selfcal_maxiter: int = 2000, selfcal_eps: float = 1.0e-6, total_eps: float = 1.0e-2,
         ellipse_th: float = 0.995, cos_th: float = 0.99,
@@ -304,9 +322,11 @@ def run_staged_parameter_search(
               repeating further
     selfcal_num -- passed to every mu-search round's totalimaging.run()
               calls
-    bayesopt_maxiter_lambda, bayesopt_maxiter_mu -- Optuna trial counts
-              for the lambda-search and mu-search stages respectively;
-              both default to 30 (Ikeda et al. 2025's own trial count)
+    bayesopt_n_startup_trials, bayesopt_n_search_trials -- shared by every
+              lambda- and mu-search stage; see search_gain_regularizers's
+              docstring for why both matter (a too-small n_search_trials
+              relative to n_startup_trials means little to no actual
+              Bayesian-guided search ever happens)
 
     Returns the final round's own winning (l1, ltsv, mu_sq, mu_abs,
     gains, image) -- these are mutually consistent in the sense that the
@@ -316,7 +336,8 @@ def run_staged_parameter_search(
     """
     stage0 = search_imaging_regularizers(
         imager, l1_exp_range=l1_exp_range, ltsv_exp_range=ltsv_exp_range,
-        bayesopt_maxiter=bayesopt_maxiter_lambda,
+        bayesopt_n_startup_trials=bayesopt_n_startup_trials,
+        bayesopt_n_search_trials=bayesopt_n_search_trials,
         imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
         ellipse_th=ellipse_th, cos_th=cos_th,
         nonnegative=nonnegative, scalehyperparam=scalehyperparam,
@@ -334,7 +355,9 @@ def run_staged_parameter_search(
             imager, antenna1, antenna2, time, vis_org, sigma,
             l1=current_l1, ltsv=current_ltsv, target=target,
             mu_sq_exp_range=cur_mu_sq_range, mu_abs_exp_range=cur_mu_abs_range,
-            selfcal_num=selfcal_num, bayesopt_maxiter=bayesopt_maxiter_mu,
+            selfcal_num=selfcal_num,
+            bayesopt_n_startup_trials=bayesopt_n_startup_trials,
+            bayesopt_n_search_trials=bayesopt_n_search_trials,
             imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
             selfcal_maxiter=selfcal_maxiter, selfcal_eps=selfcal_eps, total_eps=total_eps,
             nonnegative=nonnegative, scalehyperparam=scalehyperparam, nthreads=nthreads,
@@ -351,7 +374,8 @@ def run_staged_parameter_search(
             imager,
             l1_exp_range=(log_l1 - narrow_width, log_l1 + narrow_width),
             ltsv_exp_range=(log_ltsv - narrow_width, log_ltsv + narrow_width),
-            bayesopt_maxiter=bayesopt_maxiter_lambda,
+            bayesopt_n_startup_trials=bayesopt_n_startup_trials,
+            bayesopt_n_search_trials=bayesopt_n_search_trials,
             imaging_maxiter=imaging_maxiter, imaging_eps=imaging_eps,
             ellipse_th=ellipse_th, cos_th=cos_th,
             nonnegative=nonnegative, scalehyperparam=scalehyperparam,
