@@ -54,6 +54,48 @@ MSSelfCalData = namedtuple(
 )
 
 
+def _set_continuum_spectral_metadata(im, msname: str, spw) -> None:
+    """
+    Work around a pre-existing gap in priism's ImageWriter: with
+    nchan=1/start=''/width='' (continuum, "map all channels into one
+    image channel"), im.imparam.start/width are left at their raw ''
+    sentinel value, which ImageWriter's spectral-WCS setup then converts
+    to a literal 0 Hz frequency increment -- this makes CASA's coordinate
+    system singular ("wcs wcsset_error: Linear transformation matrix is
+    singular") whenever exportimage() is called, as
+    priism.core.imager.SparseModelingImager.optimizeparameters() does
+    internally for every trial (2026-08-21, found running
+    paramsearch.search_imaging_regularizers on real HD142527 data).
+
+    This only affects FITS/CASA-image metadata written by exportimage(),
+    not imaging itself -- fill_data() already computed and used the real
+    channel mapping during readvis(), before this function ever runs.
+
+    Only applied when spw resolves to a single integer SPW id (more
+    complex spw selections -- multiple SPWs, ranges -- are left
+    untouched; this package's nchan=1 restriction already assumes a
+    single SPW in practice).
+    """
+    try:
+        spw_id = int(spw)
+    except (TypeError, ValueError):
+        return
+
+    tb = casatools.table()
+    tb.open(msname + '/SPECTRAL_WINDOW')
+    try:
+        chan_freq = tb.getcell('CHAN_FREQ', spw_id)
+        chan_width = tb.getcell('CHAN_WIDTH', spw_id)
+    finally:
+        tb.close()
+
+    ref_freq_hz = float(np.mean(chan_freq))
+    bandwidth_hz = float(np.sum(np.abs(chan_width)))
+
+    im.imparam.start = f'{ref_freq_hz}Hz'
+    im.imparam.width = f'{bandwidth_hz}Hz'
+
+
 def count_antennas(msname: str) -> int:
     """
     Number of rows in msname's ANTENNA subtable.
@@ -98,7 +140,13 @@ def read_ms_for_selfcal(
                         restriction as priism's own defineimage())
         nchan, start, width -- passed to defineimage(); default (nchan=1,
                         start='', width='') maps all selected visibility
-                        channels into one continuum image channel
+                        channels into one continuum image channel. With
+                        this default, imparam.start/width are also set
+                        from the SPW's real reference frequency/bandwidth
+                        after reading (see _set_continuum_spectral_metadata)
+                        so that exportimage()/optimizeparameters() (used
+                        by paramsearch.search_imaging_regularizers) don't
+                        hit a singular-WCS error; does not affect imaging
         antenna_offset -- added to this MS's local ANTENNA1/ANTENNA2
                         indices before building Gains. Real ALMA antenna
                         IDs are local to each MS (antenna 5 in one MS need
@@ -127,6 +175,9 @@ def read_ms_for_selfcal(
     im.defineimage(imsize=imsize, cell=cell, phasecenter=str(field),
                    nchan=nchan, start=start, width=width)
     im.readvis(with_gain_metadata=True)
+
+    if nchan == 1 and start == '' and width == '':
+        _set_continuum_spectral_metadata(im, msname, spw)
 
     ws = im.working_set
     global_antenna1 = ws.antenna1.astype(np.int64) + antenna_offset

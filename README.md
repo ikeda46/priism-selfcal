@@ -27,6 +27,12 @@ data = read_ms_for_selfcal(
 # data.antenna_offset -- 0 for single-MS use; see read_multi_ms_for_selfcal for multiple MSs
 ```
 
+With the default continuum settings (`nchan=1, start='', width=''`), this also sets
+`data.imager.imparam.start`/`width` from the SPW's real reference frequency/bandwidth --
+working around a pre-existing priism gap where leaving them at their raw `''` value makes
+`exportimage()` (used internally by `paramsearch.search_imaging_regularizers`) fail with a
+singular-WCS error. This doesn't affect imaging itself, only FITS/CASA-image metadata.
+
 `read_multi_ms_for_selfcal()` does the same for a list of MSs, assigning
 each a disjoint block of antenna numbers so their `Gains` never collide
 (real ALMA antenna IDs are local to each MS).
@@ -229,9 +235,15 @@ just paying for random search. This requires priism's
 parameter).
 
 Each mu-search trial runs a full `totalimaging.run()`, so the whole
-procedure can take a while on real data (on 512x512/~50000-visibility
-HD142527 data, roughly an hour per ~50 combined startup+search trials
-per stage) -- start with small values while testing your setup,
+procedure can take a while on real data -- on 512x512/~50000-visibility
+HD142527 data, a full `run_staged_parameter_search()` (default
+`n_refine_rounds=1`: stage0 + mu_round0 + lambda_round0, each 50
+combined startup+search trials, plus each lambda stage's own
+higher-maxiter convergence solve) took **~2.5 hours** end to end
+(2026-08-22). mu-search trials dominate this (each runs a full
+`totalimaging.run()`, ~2 min/trial at `selfcal_num=3`); lambda-search
+trials are much cheaper (~30s/trial, no self-calibration). Start with
+small trial counts and small `imsize` while testing your setup,
 following this package's test suite (`tests/test_paramsearch.py`) as a
 template for a fast, synthetic-data smoke test before running on a real
 MS. Also double-check your search ranges actually bracket a region
@@ -239,4 +251,15 @@ where the lambda search's C1/C2 can reach `ellipse_th`/`cos_th` --
 too-narrow ranges silently produce a "best effort" result that never
 satisfies either soft constraint (also discovered 2026-08-21: a
 HD142527 run with `ltsv_exp_range=(0, 4)` maxed out C1~0.76 against a
-0.995 target, because a much larger lambda_tsv was actually needed).
+0.995 target, because a much larger lambda_tsv was actually needed) --
+but don't over-correct by widening ranges alone: an unbounded lambda_tsv
+can also let the search chase the ellipsoid criterion at the expense of
+the image itself (a HD142527 run that let lambda_tsv reach 1e15
+produced a visibly degraded, half-missing ring before the
+warm-start/final-convergence fix above was in place).
+
+**Validated on real data (2026-08-22):** a full run on HD142527
+(`imsize=512`, `target='large_variance'`) reproduced the expected
+crescent-ring morphology with gains clustered near `1+0j`
+(`|gain|` in `[0.92, 1.28]`, no outliers) at
+`(lambda1, lambda_tsv, mu_sq, mu_abs) = (1e5, 1e14, 1e5, 10)`.
