@@ -1,0 +1,169 @@
+# Copyright (C) 2026
+# The Institute of Statistical Mathematics
+# 10-3 Midori-cho, Tachikawa, Tokyo 190-8562, Japan.
+#
+# This file is part of priism-selfcal.
+#
+# priism-selfcal is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# priism-selfcal is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# You should have received a copy of the GNU General Public License
+# along with priism-selfcal.  If not, see <https://www.gnu.org/licenses/>.
+"""
+End-to-end example: fully automated imaging + self-calibration of a real
+ALMA Measurement Set, using paramsearch.run_staged_parameter_search() to
+choose all four regularization weights (lambda1, lambda_tsv, mu_sq,
+mu_abs) rather than setting them by hand.
+
+Usage:
+    python examples/hd142527_paramsearch.py /path/to/data.ms /path/to/outdir
+
+Edit MSNAME/OUTDIR below directly if you'd rather not pass them as
+arguments.
+
+Expect this to take a while: on real HD142527 data (512x512 image,
+~50000 visibilities), a full run (the default n_refine_rounds=1: one
+lambda search, one mu search, one refined lambda search, each 50
+combined Optuna startup+search trials, plus each lambda stage's own
+higher-maxiter convergence solve) took ~2.5 hours end to end
+(2026-08-22). mu-search trials dominate the cost, since each runs a full
+totalimaging.run() (imaging <-> self-calibration alternation); lambda-
+search trials are much cheaper (no self-calibration). See README.md's
+"paramsearch" section for what each stage does and why it's shaped this
+way, and tests/test_paramsearch.py for a fast synthetic-data smoke test
+to try your setup against before committing to a real, multi-hour run.
+
+Validated result (2026-08-22): this script reproduced HD142527's
+expected crescent-ring morphology with gains clustered near 1+0j
+(|gain| in [0.92, 1.28], no outliers) at
+(lambda1, lambda_tsv, mu_sq, mu_abs) = (1e5, 1e14, 1e5, 10).
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# priism's "sakura" alignment/gridding helper library (libsakurapy) is a
+# separate, sometimes hard-to-obtain C extension that this package's own
+# NUFFT-based imaging path (solver='pymfista_nufft', used below) doesn't
+# actually need -- only priism.core.datacontainer/alma.gridder import it
+# at module load time. If it isn't installed, stub it out; if it *is*
+# installed, this stub is simply never used (the real import wins).
+try:
+    import priism.external.sakura  # noqa: F401
+except ImportError:
+    import types
+    sakura_stub = types.ModuleType('priism.external.sakura')
+    sakura_stub.empty_aligned = lambda shape, dtype=np.float64: np.empty(shape, dtype=dtype)
+    sakura_stub.empty_like_aligned = lambda a: np.empty_like(a)
+    sys.modules['priism.external.sakura'] = sakura_stub
+
+from priism_selfcal.msreader import read_ms_for_selfcal
+from priism_selfcal import paramsearch
+
+MSNAME = sys.argv[1] if len(sys.argv) > 1 else '/path/to/concat.ms.cal.HD142527.avg60'
+OUTDIR = sys.argv[2] if len(sys.argv) > 2 else '/path/to/output/directory'
+
+
+def main():
+    os.makedirs(OUTDIR, exist_ok=True)
+    t_start = time.time()
+
+    print('=== reading MS ===', flush=True)
+    data = read_ms_for_selfcal(
+        MSNAME, spw='0', imsize=512, cell='0.01arcsec', field='0',
+        datacolumn='data', solver='pymfista_nufft',
+    )
+    ws = data.imager.working_set
+    vis_org = ws.rdata + 1j * ws.idata
+    sigma = 1.0 / np.sqrt(ws.weight)
+    print(f'M = {vis_org.size}, gain_num = {data.gains.gain_num}, st_num = {data.gains.st_num}',
+          flush=True)
+
+    # 'large_variance' allows more gain wobble than 'small_variance'
+    # (Ikeda et al. 2025's two tested targets); pick whichever matches
+    # how noisy you expect the observing conditions to have been.
+    target = paramsearch.GAIN_TARGETS['large_variance']
+    print(f'gain target: sigma_ph={target.sigma_ph} deg, sigma_amp={target.sigma_amp}', flush=True)
+
+    # Search ranges below are deliberately wide (found by trial and
+    # error on this exact dataset, 2026-08-21/22): too-narrow ranges
+    # silently return a "best effort" result that never actually
+    # satisfies the lambda search's C1/C2 soft constraints, or clamps
+    # mu to whatever boundary is closest to the true optimum. If you're
+    # imaging a different dataset/pixel scale, start even wider and
+    # narrow down once you see where the search actually lands.
+    result = paramsearch.run_staged_parameter_search(
+        data.imager, ws.antenna1, ws.antenna2, ws.time, vis_org, sigma, target,
+        l1_exp_range=(-4, 6), ltsv_exp_range=(-2, 15),
+        mu_sq_exp_range=(0, 12), mu_abs_exp_range=(0, 10),
+        narrow_width=2, n_refine_rounds=1,
+        selfcal_num=3,
+        bayesopt_n_startup_trials=20, bayesopt_n_search_trials=30,
+        imaging_maxiter=300, selfcal_maxiter=2000,
+        imageprefix=os.path.join(OUTDIR, '_scratch_image'),
+    )
+
+    t_end = time.time()
+    print(f'=== staged search complete in {t_end - t_start:.1f} sec ===', flush=True)
+
+    # --- save outputs ---
+    np.save(os.path.join(OUTDIR, 'image_raw.npy'), result.image)
+
+    # Standing display convention for this pipeline's images (confirmed
+    # against HD142527's known orientation, 2026-08-21): rotate 90 degrees
+    # clockwise, then flip left-right. Re-check against a known source
+    # orientation before trusting this for a different phasecenter/imsize
+    # setup.
+    displayed_image = np.fliplr(np.rot90(result.image, k=-1))
+    np.save(os.path.join(OUTDIR, 'image.npy'), displayed_image)
+
+    fig, ax = plt.subplots(figsize=(6, 6), facecolor='white')
+    ax.imshow(displayed_image, origin='lower', cmap='inferno')
+    ax.set_title('HD142527 (staged param search)')
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, 'image.png'), dpi=150)
+    plt.close(fig)
+
+    result.gains.plot_gains(fname=os.path.join(OUTDIR, 'gain_scatter.png'))
+
+    sigma_ph, sigma_amp = paramsearch.gain_dispersion(result.gains.gain)
+    amp = np.abs(result.gains.gain)
+    summary = dict(
+        elapsed_sec=t_end - t_start,
+        l1=result.l1, ltsv=result.ltsv, mu_sq=result.mu_sq, mu_abs=result.mu_abs,
+        gain_target=dict(sigma_ph=target.sigma_ph, sigma_amp=target.sigma_amp),
+        gain_dispersion_achieved=dict(sigma_ph=sigma_ph, sigma_amp=sigma_amp),
+        gain_amp_min=float(amp.min()),
+        gain_amp_max=float(amp.max()),
+        image_sum=float(result.image.sum()),
+        image_max=float(result.image.max()),
+        stage_results={
+            stage: dict(
+                **({'l1': r.l1, 'ltsv': r.ltsv} if hasattr(r, 'l1') else {}),
+                **({'mu_sq': r.mu_sq, 'mu_abs': r.mu_abs, 'cost': r.cost} if hasattr(r, 'mu_sq') else {}),
+            )
+            for stage, r in result.stages.items()
+        },
+    )
+    with open(os.path.join(OUTDIR, 'summary.json'), 'w') as f:
+        json.dump(summary, f, indent=2)
+
+    print(json.dumps(summary, indent=2))
+    print('=== DONE ===', flush=True)
+
+
+if __name__ == '__main__':
+    main()
