@@ -62,6 +62,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.cm as mcm
 import matplotlib.pyplot as plt
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # EHT's own color palette (github.com/liamedeiros/ehtplot, installed as
 # "pyehtplot") registers 'afmhot_10us' -- the perceptually-uniformized
@@ -175,7 +176,13 @@ def main():
     ax.set_xlabel('Relative RA [arcsec]')
     ax.set_ylabel('Relative Dec [arcsec]')
     ax.set_title('HD142527 (staged param search)')
-    fig.colorbar(im, ax=ax, label='Jy/pixel')
+    # make_axes_locatable ties the colorbar axis's height to the image
+    # axes' own height exactly, unlike fig.colorbar(im, ax=ax)'s default
+    # (which can end up taller/shorter than the image once tight_layout
+    # adjusts the figure).
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('right', size='5%', pad=0.05)
+    fig.colorbar(im, cax=cax, label='Jy/pixel')
     fig.tight_layout()
     fig.savefig(os.path.join(OUTDIR, 'image.png'), dpi=150)
     plt.close(fig)
