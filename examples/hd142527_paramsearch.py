@@ -26,6 +26,13 @@ Usage:
 Edit MSNAME/OUTDIR below directly if you'd rather not pass them as
 arguments.
 
+Optional: for the exact EHT color palette used in the saved image
+(afmhot_10us, the perceptually-uniformized afmhot variant used in EHT
+M87/Sgr A* images), install ehtplot --
+    pip install git+https://github.com/liamedeiros/ehtplot
+(not on PyPI under that name; installs as "pyehtplot"). Without it,
+this script falls back to matplotlib's stock 'afmhot'.
+
 Expect this to take a while: on real HD142527 data (512x512 image,
 ~50000 visibilities), a full run (the default n_refine_rounds=1: one
 lambda search, one mu search, one refined lambda search, each 50
@@ -53,7 +60,26 @@ import time
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
+import matplotlib.cm as mcm
 import matplotlib.pyplot as plt
+
+# EHT's own color palette (github.com/liamedeiros/ehtplot, installed as
+# "pyehtplot") registers 'afmhot_10us' -- the perceptually-uniformized
+# afmhot variant used in EHT M87/Sgr A* images -- as a matplotlib
+# colormap on import. Its color/ctab.py still calls the removed
+# matplotlib.cm.get_cmap (dropped in matplotlib >=3.11), so shim it back
+# before importing; falls back to matplotlib's stock 'afmhot' if
+# ehtplot isn't installed at all.
+try:
+    if not hasattr(mcm, 'get_cmap'):
+        mcm.get_cmap = plt.get_cmap  # matplotlib >=3.11 compat shim for ehtplot
+    import ehtplot.color  # noqa: F401  (registers 'afmhot_10us' with matplotlib)
+    IMAGE_CMAP = 'afmhot_10us'
+except ImportError:
+    print("WARNING: ehtplot not installed (pip install git+https://github.com/"
+          "liamedeiros/ehtplot) -- falling back to matplotlib's stock 'afmhot', "
+          "not the exact EHT-uniformized 'afmhot_10us'.", flush=True)
+    IMAGE_CMAP = 'afmhot'
 
 # priism's "sakura" alignment/gridding helper library (libsakurapy) is a
 # separate, sometimes hard-to-obtain C extension that this package's own
@@ -76,6 +102,9 @@ from priism_selfcal import paramsearch
 MSNAME = sys.argv[1] if len(sys.argv) > 1 else '/path/to/concat.ms.cal.HD142527.avg60'
 OUTDIR = sys.argv[2] if len(sys.argv) > 2 else '/path/to/output/directory'
 
+IMSIZE = 512
+CELL_ARCSEC = 0.01  # must match the `cell` string passed to read_ms_for_selfcal below
+
 
 def main():
     os.makedirs(OUTDIR, exist_ok=True)
@@ -83,7 +112,7 @@ def main():
 
     print('=== reading MS ===', flush=True)
     data = read_ms_for_selfcal(
-        MSNAME, spw='0', imsize=512, cell='0.01arcsec', field='0',
+        MSNAME, spw='0', imsize=IMSIZE, cell=f'{CELL_ARCSEC}arcsec', field='0',
         datacolumn='data', solver='pymfista_nufft',
     )
     ws = data.imager.working_set
@@ -130,9 +159,23 @@ def main():
     displayed_image = np.fliplr(np.rot90(result.image, k=-1))
     np.save(os.path.join(OUTDIR, 'image.npy'), displayed_image)
 
+    # Angular (not pixel) axes, RA increasing to the left as in Ikeda et
+    # al. 2025's own figures: extent's left edge is +half_fov (positive
+    # RA), right edge is -half_fov, so imshow's normal left-to-right
+    # pixel order renders decreasing RA.
+    ny, nx = displayed_image.shape
+    half_fov_x = nx / 2.0 * CELL_ARCSEC
+    half_fov_y = ny / 2.0 * CELL_ARCSEC
+
     fig, ax = plt.subplots(figsize=(6, 6), facecolor='white')
-    ax.imshow(displayed_image, origin='lower', cmap='inferno')
+    im = ax.imshow(
+        displayed_image, origin='lower', cmap=IMAGE_CMAP,
+        extent=(half_fov_x, -half_fov_x, -half_fov_y, half_fov_y),
+    )
+    ax.set_xlabel('Relative RA [arcsec]')
+    ax.set_ylabel('Relative Dec [arcsec]')
     ax.set_title('HD142527 (staged param search)')
+    fig.colorbar(im, ax=ax, label='Jy/pixel')
     fig.tight_layout()
     fig.savefig(os.path.join(OUTDIR, 'image.png'), dpi=150)
     plt.close(fig)
