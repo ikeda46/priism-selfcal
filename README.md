@@ -2,10 +2,15 @@
 
 Self-calibration for ALMA sparse-modeling imaging (Ikeda et al. 2025),
 standalone from [priism](https://github.com/tnakazato/priism) (a runtime
-dependency, not a fork). Currently depends on priism's
-`selfcal-gain-metadata` branch (adds the `antenna1`/`antenna2`/`time`
-metadata self-cal needs to `readvis()`) rather than `pysparseimaging`;
-see that branch's own history for details.
+dependency, not a fork). Currently depends on
+[ikeda46/priism](https://github.com/ikeda46/priism)'s `pysparseimaging`
+branch (adds the `antenna1`/`antenna2`/`time` metadata self-cal needs to
+`readvis()`, plus several fixes this package's own development surfaced
+in priism itself -- see that branch's own history for details). Some of
+this fork's earlier work (through commit `38d90a6`/PR #69) was merged
+into upstream tnakazato/priism's `main`, but the gain-metadata feature
+and the priism-side fixes from 2026-08-21 onward have not been, as of
+2026-08-26 -- upstream `main` alone is not enough to run this package.
 
 ## Usage
 
@@ -27,11 +32,11 @@ data = read_ms_for_selfcal(
 # data.antenna_offset -- 0 for single-MS use; see read_multi_ms_for_selfcal for multiple MSs
 ```
 
-With the default continuum settings (`nchan=1, start='', width=''`), this also sets
-`data.imager.imparam.start`/`width` from the SPW's real reference frequency/bandwidth --
-working around a pre-existing priism gap where leaving them at their raw `''` value makes
-`exportimage()` (used internally by `paramsearch.search_imaging_regularizers`) fail with a
-singular-WCS error. This doesn't affect imaging itself, only FITS/CASA-image metadata.
+With the default continuum settings (`nchan=1, start='', width=''`), `exportimage()`
+(used internally by `paramsearch.search_imaging_regularizers`) used to fail with a
+singular-WCS error, since leaving `imparam.start`/`width` at their raw `''` value made
+CASA's spectral WCS singular. Fixed directly in priism (`pysparseimaging` branch,
+commit `06a6338`, 2026-08-26); this package no longer needs to work around it.
 
 `read_multi_ms_for_selfcal()` does the same for a list of MSs, assigning
 each a disjoint block of antenna numbers so their `Gains` never collide
@@ -229,10 +234,9 @@ data with a 10-trial budget for the mu-search stage, where *every*
 trial turned out to be random (n_startup_trials also defaults to 10),
 i.e. no real Bayesian optimization ever happened. Make sure
 `n_search_trials` is comfortably larger than a token handful, or you're
-just paying for random search. This requires priism's
-`selfcal-gain-metadata` branch to include commit `bcfea6b` or later
-(which added `optimizeparameters`'s `bayesopt_n_startup_trials`
-parameter).
+just paying for random search. This requires priism's `pysparseimaging`
+branch to include commit `bcfea6b` or later (which added
+`optimizeparameters`'s `bayesopt_n_startup_trials` parameter).
 
 Each mu-search trial runs a full `totalimaging.run()`, so the whole
 procedure can take a while on real data -- on 512x512/~50000-visibility
