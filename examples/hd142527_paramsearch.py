@@ -219,6 +219,19 @@ def main():
         overwrite=True, antenna_offset=data.antenna_offset,
     )
 
+    # Cross-check: CASA's own plotms can draw the exact same real-vs-
+    # imaginary gain scatter as Gains.plot_gains() above, straight from
+    # selfcal.gcal -- useful to confirm the caltable actually holds what
+    # you expect, independent of this package's own plotting code.
+    # Left commented out and UNVERIFIED: plotms lives in the separate
+    # "casaplotms" package (Qt/GUI-dependent), which isn't installed in
+    # every CASA environment (this one included), so this exact call
+    # hasn't been run end-to-end here -- treat it as a starting point,
+    # not a tested command.
+    # from casaplotms import plotms
+    # plotms(vis=gaintable_path, xaxis='real', yaxis='imag', coloraxis='antenna1',
+    #        plotfile=os.path.join(OUTDIR, 'gain_scatter_casa.png'), overwrite=True)
+
     sigma_ph, sigma_amp = paramsearch.gain_dispersion(result.gains.gain)
     amp = np.abs(result.gains.gain)
     summary = dict(
