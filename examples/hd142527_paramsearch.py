@@ -26,6 +26,14 @@ Usage:
 Edit MSNAME/OUTDIR below directly if you'd rather not pass them as
 arguments.
 
+Outputs written to OUTDIR: image.fits (the actual imaging-command
+output -- a real CASA/FITS image from the winning (l1, ltsv) solve, via
+AlmaSparseModelingImager.exportimage()) and selfcal.gcal (the
+self-calibration result as a standard CASA G-Jones caltable, via
+casa_gaintable.write_gaintable(), applicable to the MS with CASA's own
+applycal); plus image_raw.npy/image.npy/image.png/gain_scatter.png/
+summary.json as diagnostics.
+
 Optional: for the exact EHT color palette used in the saved image
 (afmhot_10us, the perceptually-uniformized afmhot variant used in EHT
 M87/Sgr A* images), install ehtplot --
@@ -98,6 +106,7 @@ except ImportError:
     sys.modules['priism.external.sakura'] = sakura_stub
 
 from priism_selfcal.msreader import read_ms_for_selfcal
+from priism_selfcal.casa_gaintable import write_gaintable
 from priism_selfcal import paramsearch
 
 MSNAME = sys.argv[1] if len(sys.argv) > 1 else '/path/to/concat.ms.cal.HD142527.avg60'
@@ -189,10 +198,33 @@ def main():
 
     result.gains.plot_gains(fname=os.path.join(OUTDIR, 'gain_scatter.png'))
 
+    # The actual imaging command: data.imager.working_set/imparam already
+    # hold the winning (l1, ltsv) solve and the gain-corrected visibility
+    # from the staged search's last stage (see
+    # paramsearch.search_imaging_regularizers's docstring), so this is a
+    # real, importable CASA/FITS image -- not just the .npy/.png diagnostic
+    # dumps above -- of the same result plotted in image.png.
+    fits_path = os.path.join(OUTDIR, 'image.fits')
+    data.imager.exportimage(fits_path, overwrite=True)
+
+    # Write the final round's self-calibration gains out as a CASA G-Jones
+    # caltable, so the result can actually be applied to the MS (e.g. via
+    # CASA's applycal) rather than staying locked inside this script's own
+    # Gains object. antenna_offset=data.antenna_offset is 0 here (single-MS
+    # use); see read_multi_ms_for_selfcal/write_gaintable's own docs for
+    # the multi-MS case.
+    gaintable_path = os.path.join(OUTDIR, 'selfcal.gcal')
+    write_gaintable(
+        result.gains, MSNAME, gaintable_path, spw=0, field=0,
+        overwrite=True, antenna_offset=data.antenna_offset,
+    )
+
     sigma_ph, sigma_amp = paramsearch.gain_dispersion(result.gains.gain)
     amp = np.abs(result.gains.gain)
     summary = dict(
         elapsed_sec=t_end - t_start,
+        fits_image=fits_path,
+        gaintable=gaintable_path,
         l1=result.l1, ltsv=result.ltsv, mu_sq=result.mu_sq, mu_abs=result.mu_abs,
         gain_target=dict(sigma_ph=target.sigma_ph, sigma_amp=target.sigma_amp),
         gain_dispersion_achieved=dict(sigma_ph=sigma_ph, sigma_amp=sigma_amp),
