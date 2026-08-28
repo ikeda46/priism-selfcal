@@ -284,8 +284,8 @@ def search_imaging_regularizers(
     bayesopt_n_startup_trials, bayesopt_n_search_trials -- see
               search_gain_regularizers's docstring; passed through to
               optimizeparameters()'s own bayesopt_n_startup_trials
-              (requires priism's pysparseimaging branch at commit
-              bcfea6b or later, which added this parameter -- 2026-08-21)
+              (requires priism's main branch at commit bcfea6b or
+              later, merged via PR #71 -- 2026-08-21/2026-08-27)
     ellipse_th, cos_th -- default to the exact values used in Ikeda et
               al. 2025 section 4 (0.995, 0.99), which differ slightly
               from priism's own general-purpose default of (0.99, 0.99)

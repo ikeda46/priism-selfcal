@@ -20,8 +20,8 @@ Real-data test of msreader.py against an actual Measurement Set.
 Unlike this package's other tests (all synthetic), read_ms_for_selfcal/
 read_multi_ms_for_selfcal wrap priism's real MS-reading path
 (AlmaSparseModelingImager.readvis(with_gain_metadata=True), on priism's
-"pysparseimaging" branch) and so need a real CASA install and a real MS
-to exercise. Set
+"main" branch as of PR #71, 2026-08-27) and so need a real CASA install
+and a real MS to exercise. Set
 PRIISM_SELFCAL_TEST_MS to point at one; tests are skipped (not failed) if
 it's unset/missing, so this file doesn't break environments without
 CASA/test data (e.g. plain CI).

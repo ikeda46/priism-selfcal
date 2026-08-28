@@ -19,7 +19,7 @@ Read one or more Measurement Sets for imaging + self-calibration.
 
 This is a thin wrapper around priism's own MS-reading path
 (AlmaSparseModelingImager.readvis(with_gain_metadata=True), on priism's
-pysparseimaging branch) --
+main branch as of PR #71, 2026-08-27) --
 imaging arrays (u/v/rdata/idata/weight) and gain-metadata arrays
 (antenna1/antenna2/time) come from the exact same MS scan, so their
 row-by-row correspondence is guaranteed by construction rather than by
